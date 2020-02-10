@@ -2,6 +2,7 @@ const { Component } = require("@serverless/core");
 const fse = require("fs-extra");
 const path = require("path");
 const execa = require("execa");
+const defu = require("defu");
 
 const isDynamicRoute = require("./lib/isDynamicRoute");
 const obtainDomains = require("./lib/obtainDomains");
@@ -19,6 +20,17 @@ const emptyDir = fse.emptyDir;
 const pathToPosix = path => path.replace(/\\/g, "/");
 
 class NextjsComponent extends Component {
+  constructor(params) {
+    super(params);
+    this.context.credentials = {
+      aws: {
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+        sessionToken: process.env.AWS_SESSION_TOKEN
+      }
+    };
+  }
+
   async default(inputs = {}) {
     if (inputs.build !== false) {
       await this.build(inputs);
@@ -422,9 +434,9 @@ class NextjsComponent extends Component {
       apiEdgeLambdaOutputs = await apiEdgeLambda(apiEdgeLambdaInput);
 
       apiEdgeLambdaPublishOutputs = await apiEdgeLambda.publishVersion();
-      const apiCloudfrontInputs =
+      let apiCloudfrontInputs =
         (inputs.cloudfront && inputs.cloudfront.api) || {};
-      cloudFrontOrigins[0].pathPatterns["api/*"] = {
+      apiCloudfrontInputs = defu(apiCloudfrontInputs, {
         ttl: 0,
         allowedHttpMethods: [
           "HEAD",
@@ -435,12 +447,12 @@ class NextjsComponent extends Component {
           "PUT",
           "PATCH"
         ],
-        ...apiCloudfrontInputs,
         // lambda@edge key is last and therefore cannot be overridden
         "lambda@edge": {
           "origin-request": `${apiEdgeLambdaOutputs.arn}:${apiEdgeLambdaPublishOutputs.version}`
         }
-      };
+      });
+      cloudFrontOrigins[0].pathPatterns["api/*"] = apiCloudfrontInputs;
     }
 
     const defaultEdgeLambdaInput = {
@@ -469,23 +481,25 @@ class NextjsComponent extends Component {
 
     const defaultCloudfrontInputs =
       (inputs.cloudfront && inputs.cloudfront.defaults) || {};
-    const cloudFrontOutputs = await cloudFront({
-      defaults: {
-        ttl: 0,
-        allowedHttpMethods: ["HEAD", "GET"],
-        ...defaultCloudfrontInputs,
-        forward: {
-          cookies: "all",
-          queryString: true,
-          ...defaultCloudfrontInputs.forward
+    const cloudFrontInputs = defu(
+      { defaults: defaultCloudfrontInputs },
+      {
+        defaults: {
+          ttl: 0,
+          allowedHttpMethods: ["HEAD", "GET"],
+          forward: {
+            cookies: "all",
+            queryString: true
+          },
+          // lambda@edge key is last and therefore cannot be overridden
+          "lambda@edge": {
+            "origin-request": `${defaultEdgeLambdaOutputs.arn}:${defaultEdgeLambdaPublishOutputs.version}`
+          }
         },
-        // lambda@edge key is last and therefore cannot be overridden
-        "lambda@edge": {
-          "origin-request": `${defaultEdgeLambdaOutputs.arn}:${defaultEdgeLambdaPublishOutputs.version}`
-        }
-      },
-      origins: cloudFrontOrigins
-    });
+        origins: cloudFrontOrigins
+      }
+    );
+    const cloudFrontOutputs = await cloudFront(cloudFrontInputs);
 
     let appUrl = cloudFrontOutputs.url;
 
